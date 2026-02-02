@@ -132,20 +132,21 @@ static void DrawMenu() {
         }
     }
     // SpongeRange++
+    ImGui::BeginDisabled(!spongePlus); // grey out if SpongeRange+ is not active
     if (ImGui::Checkbox("SpongeRange++", &spongePlusPlus) && g_PatchesReady) {
         const uint8_t patchPlusPlus[] = {0x5F, 0xFD, 0x03, 0xF1, 0x8B, 0x2D, 0x0D, 0x9B};
         size_t idx = 5;
         if (idx < g_PatchAddrs.size()) {
             if (spongePlusPlus) {
                 WriteMemory((void*)g_PatchAddrs[idx], (void*)patchPlusPlus, sizeof(patchPlusPlus), true);
-                spongePlus = true;
             } else {
                 WriteMemory((void*)g_PatchAddrs[idx], (void*)g_Originals[idx].data(), 4, true);
             }
         }
     }
-    // Absorb Type
-    ImGui::Text("Absorb Type"); ImGui::SameLine();
+    ImGui::EndDisabled();
+    ImGui::Text("Absorb Type");
+    ImGui::SameLine();
     // Number display
     ImGui::SetNextItemWidth(50);
     ImGui::InputInt("##absorbDisplay", &absorbTypeVal, 0, 0, ImGuiInputTextFlags_ReadOnly);
@@ -159,8 +160,10 @@ static void DrawMenu() {
         ImGui::OpenPopup("AbsorbKeypad");
     }
     ImGui::SameLine();
-    // Square gap
-    ImGui::Dummy(ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()));
+    // i button
+    if (ImGui::Button("i", ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()))) {
+        ImGui::OpenPopup("AbsorbTypeInfo");
+    }
     ImGui::SameLine();
     // Minus button
     if (ImGui::Button("-", ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()))) {
@@ -182,6 +185,49 @@ static void DrawMenu() {
                 }
             }
         }
+    }
+    // Info popup
+    if (ImGui::BeginPopup("AbsorbTypeInfo", ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Absorb Type Reference");
+        ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - ImGui::GetFrameHeight());
+        if (ImGui::Button("X", ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()))) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::Separator();
+        if (ImGui::BeginTable("AbsorbRefTable", 2, ImGuiTableFlags_NoBordersInBody)) {
+            // First column
+            ImGui::TableNextColumn();
+            ImGui::BulletText("0 = air");
+            ImGui::BulletText("1 = dirt");
+            ImGui::BulletText("2 = wood");
+            ImGui::BulletText("3 = metal");
+            ImGui::BulletText("4 = copper grates");
+            ImGui::BulletText("5 = water");
+            ImGui::BulletText("6 = lava");
+            ImGui::BulletText("7 = leaves");
+            ImGui::BulletText("8 = plants");
+            ImGui::BulletText("9 = azalea, dried kelp, solid plants");
+            ImGui::BulletText("10 = fire, soul fire");
+            ImGui::BulletText("11 = glass");
+            ImGui::BulletText("12 = tnt");
+            // Second column
+            ImGui::TableNextColumn();
+            ImGui::BulletText("13 = ice (not blue/packed)");
+            ImGui::BulletText("14 = powdered snow");
+            ImGui::BulletText("15 = cactus");
+            ImGui::BulletText("16 = portals");
+            ImGui::BulletText("17 = unknown");
+            ImGui::BulletText("18 = bubble column");
+            ImGui::BulletText("19 = unknown");
+            ImGui::BulletText("20 = decorated pot, decoration solids");
+            ImGui::BulletText("21 = n/a");
+            ImGui::BulletText("22 = structure void");
+            ImGui::BulletText("23 = stone, etc, solids");
+            ImGui::BulletText("24 = torches, pot, etc, non-solids");
+            ImGui::BulletText("25 = unknown");
+            ImGui::EndTable();
+        }
+        ImGui::EndPopup();
     }
     // Keypad popup window
     if (ImGui::BeginPopup("AbsorbKeypad", ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize)) {
@@ -234,7 +280,10 @@ static void DrawMenu() {
 static void ScanSignatures() {
     uintptr_t base = GlossGetLibSection("libminecraftpe.so", ".text", nullptr);
     size_t size = 0;
-    GlossGetLibSection("libminecraftpe.so", ".text", &size);
+    // Wait until libminecraftpe.so is loaded and section is valid, we don't want a bad pointer
+    while ((base = GlossGetLibSection("libminecraftpe.so", ".text", &size)) == 0 || size == 0) {
+        usleep(1000); // Sleep 1ms between retries
+    }
     // Signature sets
     const std::vector<std::vector<uint8_t>> signatures = {
         // InfinitySpread

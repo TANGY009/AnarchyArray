@@ -34,25 +34,39 @@
   Sponges absorb far beyond their normal radius, wiping huge areas clean in seconds.  
 
 - 🧽 **SpongeRange++**  
-  If your device survived SpongeRange+, push it further — total wipe potential.  
+  If your device survived SpongeRange+, push it further — near-total wipe potential.  
 
 - 🔄 **AbsorbType for Sponge**  
-  Sponges don’t just soak water; they’ll consume lava, fluids, and more depending on config.  
+  Sponges don’t just soak water; they’ll consume lava, blocks, and more depending on config.  
 
 ## 📖 Known AbsorbTypes
 
 - 0 = air
 - 1 = dirt
 - 2 = wood
-- 3 = block of iron, gold, emerald, diamond, netherite and coppper & its product (excluding copper grates)
+- 3 = block of iron, gold, redstone, emerald, diamond, netherite and coppper & its product (excluding copper grates and lapis), etc
 - 4 = copper grates
 - 5 = water (default)
-- 6 = lava (sorry, sponges don't work in the nether)
+- 6 = lava (sponges don't work in the nether)
 - 7 = leaves
-- 8 = flowers, leaf litter, kelp, etc
-- 23 = ores, stone & deepslate along with their variants, sponge (for some reason, sponge can also absorb themselves too)
----
-**AND there are even more, I don't have time to discover them all, maybe you can...**
+- 8 = flowers, leaf litter, kelp, etc, plants
+- 9 = azalea, dried kelp, etc, solid plants
+- 10 = fire, soul fire
+- 11 = glass
+- 12 = tnt
+- 13 = ice (NOT blue or packed ice)
+- 14 = powdered snow
+- 15 = cactus
+- 16 = portal, end portal, end gateway portal
+- 17 = unknown
+- 18 = bubble column
+- 19 = unknown
+- 20 = decorated pot, decoration solids
+- 21 = n/a
+- 22 = structure void
+- 23 = sand, stone, deeplate, etc, solids
+- 24 = torches, scaffolding, pot, non-solids
+- 25 = unknown
 
 ## ⚙️ Requirements
 
