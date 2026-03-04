@@ -1,5 +1,10 @@
 # 🌌 **AnarchyArray**
 
+![Downloads](https://img.shields.io/github/downloads/TANGY009/AnarchyArray/total.svg?label=Downloads&color=blue&style=for-the-badge) 
+![Stars](https://img.shields.io/github/stars/TANGY009/AnarchyArray.svg?label=Stars&color=yellow&style=for-the-badge&logo=none)
+![Forks](https://img.shields.io/github/forks/TANGY009/AnarchyArray.svg?label=Forks&color=orange&style=for-the-badge&logo=none)
+![License](https://img.shields.io/github/license/TANGY009/AnarchyArray.svg?label=License&color=brightgreen&style=for-the-badge)
+
 > [!NOTE]  
 > 💡 Original concept credited and thanks to [Max‑RM](https://github.com/Max-RM), who first discovered this on Windows.<br>
 > 📝 The Android signatures were later found by me
