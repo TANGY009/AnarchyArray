@@ -52,7 +52,7 @@
 - 3 = block of iron, gold, redstone, emerald, diamond, netherite and coppper & its product (excluding copper grates and lapis), etc
 - 4 = copper grates
 - 5 = water (default)
-- 6 = lava (sponges don't work in the nether)
+- 6 = lava
 - 7 = leaves
 - 8 = flowers, leaf litter, kelp, etc, plants
 - 9 = azalea, dried kelp, etc, solid plants
@@ -87,4 +87,5 @@
 - This project is licensed under the GNU LGPL v3.0.  
 - It also uses third-party libraries (ImGui, fmtlib) licensed under the MIT License.  
 - See the NOTICE file for details.
+
 
