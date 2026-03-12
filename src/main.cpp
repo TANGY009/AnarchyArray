@@ -256,7 +256,6 @@ static void DrawMenu() {
     static bool infinitySpread = false;
     static bool spongePlus = false;
     static bool spongePlusPlus = false;
-    static bool netherSponge = false;
     static int absorbTypeVal = 5;
     static int lastAbsorbValue = -1;
     // InfinitySpread
@@ -296,17 +295,6 @@ static void DrawMenu() {
         }
     }
     ImGui::EndDisabled();
-    //if (ImGui::Checkbox("NetherSponge", &netherSponge) && g_PatchesReady) {
-    //    const uint8_t patchNether[] = {0xSoon};
-    //    size_t idx = 8; // choose the correct index after scanning signatures
-    //    if (idx < g_PatchAddrs.size()) {
-    //       if (netherSponge) {
-    //           WriteMemory((void*)g_PatchAddrs[idx], (void*)patchNether, sizeof(patchNether), true);
-    //        } else {
-    //            WriteMemory((void*)g_PatchAddrs[idx], g_Originals[idx].data(), g_Originals[idx].size(), true);
-    //        }
-    //    }
-    //}
     ImGui::Text("Absorb Type");
     ImGui::SameLine();
     // Number display
