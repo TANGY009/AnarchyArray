@@ -4,6 +4,8 @@
 #include <cstring>
 #include <vector>
 #include <mutex>
+#include <string>
+#include <sstream>
 
 #include <jni.h>
 #include <android/input.h>
@@ -209,9 +211,6 @@ static uint32_t EncodeCmpW8Imm_Table(int imm) { // for absorb type
     p[2] = (uint8_t)block;
     return instr;
 }
-
-#include <string>
-#include <sstream>
 
 struct PatternByte {
     uint8_t data;
