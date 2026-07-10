@@ -4,7 +4,7 @@ project(AnarchyArray LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_POSITION_INSIDE_CODE ON)
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
 add_compile_options(
@@ -25,26 +25,11 @@ add_link_options(
 include(FetchContent)
 
 FetchContent_Declare(
-    fmt
-    GIT_REPOSITORY https://github.com/fmtlib/fmt.git
-)
-FetchContent_MakeAvailable(fmt)
-
-FetchContent_Declare(
     preloader_android
     GIT_REPOSITORY https://github.com/LiteLDev/preloader-android.git
     GIT_TAG main
 )
-
 FetchContent_MakeAvailable(preloader_android)
-
-target_link_libraries(preloader PRIVATE fmt::fmt)
-
-include_directories(
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/src/ImGui
-    ${CMAKE_SOURCE_DIR}/src/ImGui/backends
-)
 
 set(IMGUI_SOURCES
     src/main.cpp
@@ -58,9 +43,17 @@ set(IMGUI_SOURCES
 
 add_library(AnarchyArray SHARED ${IMGUI_SOURCES})
 
+target_include_directories(AnarchyArray PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/ImGui
+    ${CMAKE_SOURCE_DIR}/src/ImGui/backends
+    ${preloader_android_SOURCE_DIR}/src
+    ${preloader_android_SOURCE_DIR}/include
+)
+
 target_link_libraries(AnarchyArray
+    PRIVATE
     preloader
-    fmt::fmt
     log
     android
     EGL

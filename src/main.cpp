@@ -9,13 +9,13 @@
 #include <android/input.h>
 #include <android/log.h>
 #include <android/native_window.h>
+#include <dlfcn.h>
 
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
 
-#include "pl/Hook.h"
 #include "pl/Gloss.h"
-#include "pl/PreloaderInput.h"
+#include "pl/legacy/LegacyInput.h"
 
 #include "ImGui/imgui.h"
 #include "ImGui/backends/imgui_impl_opengl3.h"
@@ -210,40 +210,89 @@ static uint32_t EncodeCmpW8Imm_Table(int imm) { // for absorb type
     return instr;
 }
 
-static void ScanSignatures() {
-    uintptr_t base = 0;
-    size_t size = 0;
-    // Wait until libminecraftpe.so is loaded and section is valid, we don't want a bad pointer
-    while ((base = GlossGetLibSection("libminecraftpe.so", ".text", &size)) == 0 || size == 0) {
-        usleep(1000); // Sleep 1ms between retries
+#include <string>
+#include <sstream>
+
+struct PatternByte {
+    uint8_t data;
+    bool isWildcard;
+};
+
+static std::vector<PatternByte> ParsePattern(const std::string& patternStr) {
+    std::vector<PatternByte> pattern;
+    std::stringstream ss(patternStr);
+    std::string token;
+    
+    while (ss >> token) {
+        if (token == "??" || token == "?") {
+            pattern.push_back({0, true});
+        } else {
+            uint8_t byte = (uint8_t)std::strtoul(token.c_str(), nullptr, 16);
+            pattern.push_back({byte, false});
+        }
     }
-    // Signature sets
-    const std::vector<std::vector<uint8_t>> signatures = {
-        // InfinitySpread
-        {0xE3,0x03,0x19,0x2A,0xE4,0x03,0x14,0xAA,0xA5,0x00,0x80,0x52,0x08,0x05,0x00,0x51},
-        {0xE3,0x03,0x19,0x2A,0x29,0x05,0x00,0x51,0xE4,0x03,0x14,0xAA,0x65,0x00,0x80,0x52},
-        {0xE3,0x03,0x19,0x2A,0xE4,0x03,0x14,0xAA,0x85,0x00,0x80,0x52,0x08,0x05,0x00,0x11},
-        {0xE3,0x03,0x19,0x2A,0x29,0x05,0x00,0x11,0xE4,0x03,0x14,0xAA,0x45,0x00,0x80,0x52},
-        // SpongeLimit+
-        {0x62,0x02,0x00,0x54,0xFB,0x13,0x40,0xF9,0x7F,0x17,0x00,0xF1},
-        // SpongeLimit++
-        {0x5F,0x51,0x05,0xF1,0x8B,0x2D,0x0D,0x9B},
-        // 1st CMP W8 #5
-        {0x1F,0x15,0x00,0x71,0xA1,0x01,0x00,0x54,0x00,0xE4,0x00,0x6F},
-        // 2nd CMP W8 #5
-        {0x1F,0x15,0x00,0x71,0x01,0xF8,0xFF,0x54,0x88,0x02,0x40,0xF9},
+    return pattern;
+}
+
+static bool MatchPattern(const uint8_t* memory, const std::vector<PatternByte>& pattern) {
+    for (size_t i = 0; i < pattern.size(); i++) {
+        if (!pattern[i].isWildcard && memory[i] != pattern[i].data) {
+            return false;
+        }
+    }
+    return true;
+}
+
+uintptr_t GetLibBase() {
+    size_t textSize{};
+    uintptr_t text = GlossGetLibSection("libminecraftpe.so", ".text", &textSize);
+    Dl_info info{};
+    if (dladdr((void*)text, &info))
+        return (uintptr_t)info.dli_fbase;
+    return 0;
+}
+
+static void ScanSignatures() {
+    uintptr_t base = GetLibBase();
+    uintptr_t txtbase = 0;
+    size_t size = 0;
+    while ((txtbase = GlossGetLibSection("libminecraftpe.so", ".text", &size)) == 0 || size == 0) {
+        usleep(1000);
+    }
+    const std::vector<std::string> patternStrings = {
+        // InfinitySpread (Index 0-3)
+        "E3 ?? ?? 2A E4 ?? ?? AA A5 ?? ?? 52 08 ?? ?? 51",
+        "E3 ?? ?? 2A 29 ?? ?? 51 E4 ?? ?? AA 65 ?? ?? 52",
+        "E3 ?? ?? 2A E4 ?? ?? AA 85 ?? ?? 52 08 ?? ?? 11",
+        "E3 ?? ?? 2A 29 ?? ?? 11 E4 ?? ?? AA 45 ?? ?? 52",
+        // SpongeLimit+ (Index 4)
+        "62 02 00 54 FB 13 40 F9 7F 17 00 F1",
+        // SpongeLimit++ (Index 5)
+        "5F 51 05 F1 8B 2D 0D 9B",
+        // 1st CMP W8 #5 (Index 6)
+        "1F 15 00 71 A1 01 00 54 00 E4 00 6F",
+        // 2nd CMP W8 #5 (Index 7)
+        "1F 15 00 71 01 F8 FF 54 88 02 40 F9"
     };
-    g_PatchAddrs.assign(signatures.size(), 0);
+
+    g_PatchAddrs.assign(patternStrings.size(), 0);
     g_Originals.clear();
-    g_Originals.resize(signatures.size());
-    for (size_t s = 0; s < signatures.size(); s++) {
-        for (size_t i = 0; i + signatures[s].size() <= size; i++) {
-            if (memcmp((void*)(base + i), signatures[s].data(), signatures[s].size()) == 0) {
-                uintptr_t addr = base + i;
-                g_PatchAddrs[s] = addr;
-                g_Originals[s].assign((uint8_t*)addr, (uint8_t*)addr + signatures[s].size());
-                //LOGI("Signature found at %p", (void*)addr);
-                break; // Stop after first match, prevents duplicates
+    g_Originals.resize(patternStrings.size());
+    
+    for (size_t s = 0; s < patternStrings.size(); s++) {
+        std::vector<PatternByte> parsedPattern = ParsePattern(patternStrings[s]);
+        size_t patternLen = parsedPattern.size();
+        if (patternLen == 0 || patternLen > size) continue;
+        for (size_t i = 0; i <= size - patternLen; i++) {
+            uintptr_t currentAddr = txtbase + i;
+            if (MatchPattern(reinterpret_cast<const uint8_t*>(currentAddr), parsedPattern)) {
+                g_PatchAddrs[s] = currentAddr;
+                g_Originals[s].assign(
+                    reinterpret_cast<uint8_t*>(currentAddr), 
+                    reinterpret_cast<uint8_t*>(currentAddr) + patternLen
+                );
+                LOGI("Signature found at binary offset: 0x%lx", (unsigned long)(currentAddr - base));
+                break;
             }
         }
     }
@@ -445,12 +494,12 @@ static void Setup(ANativeWindow* window) {
     if (scale < 1.5f) scale = 1.5f;
     if (scale > 4.0f) scale = 4.0f;
     ImFontConfig cfg;
-    cfg.SizePixels = 18.0f * scale;
+    cfg.SizePixels = 30.0f * scale;
     io.Fonts->AddFontDefault(&cfg);
     ImGui_ImplAndroid_Init(window);
     ImGui_ImplOpenGL3_Init("#version 300 es");
     ImGuiStyle& style = ImGui::GetStyle();
-    style.ScaleAllSizes(scale * 0.65f);
+    style.ScaleAllSizes(scale * 1.10f);
     style.Alpha = 1.0f;
     g_Initialized = true;
     LOGI("ImGui initialized successfully");
