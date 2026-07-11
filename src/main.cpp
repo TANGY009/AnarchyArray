@@ -1,206 +1,8 @@
-#include <cstdint>
-#include <cstdlib>
-#include <cstdio>
-#include <cstring>
-#include <vector>
-#include <mutex>
-#include <string>
-#include <sstream>
+#include "main.hpp"
+#include "input.hpp"
+#include "rendering.hpp"
 
-#include <jni.h>
-#include <android/input.h>
-#include <android/log.h>
-#include <android/native_window.h>
-#include <dlfcn.h>
-
-#include <EGL/egl.h>
-#include <GLES3/gl3.h>
-
-#include "pl/Gloss.h"
-#include "pl/legacy/LegacyInput.h"
-
-#include "ImGui/imgui.h"
-#include "ImGui/backends/imgui_impl_opengl3.h"
-#include "ImGui/backends/imgui_impl_android.h"
-
-#define LOG_TAG "AnarchyArray"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
-
-static bool g_Initialized = false;
-static int g_Width = 0;
-static int g_Height = 0;
-static ANativeWindow* g_Window = nullptr;
-static bool g_touchCapturedByGui = false;
-static std::mutex g_boundsMutex;
-static bool g_PatchesReady = false;
-static std::vector<uintptr_t> g_PatchAddrs;
-static std::vector<std::vector<uint8_t>> g_Originals;
-
-static ANativeWindow* (*orig_ANativeWindow_fromSurface)(JNIEnv* env, jobject surface) = nullptr;
-static EGLBoolean (*orig_eglMakeCurrent)(EGLDisplay, EGLSurface, EGLSurface, EGLContext) = nullptr;
-static EGLBoolean (*orig_eglSwapBuffers)(EGLDisplay, EGLSurface) = nullptr;
-
-struct GLState {
-    GLint program;
-    GLint vao;
-    GLint fbo;
-    GLint viewport[4];
-    GLint scissor[4];
-    GLboolean blend;
-    GLboolean scissorTest;
-};
-
-static void SaveGL(GLState& s) {
-    glGetIntegerv(GL_CURRENT_PROGRAM, &s.program);
-    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &s.vao);
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &s.fbo);
-    glGetIntegerv(GL_VIEWPORT, s.viewport);
-    glGetIntegerv(GL_SCISSOR_BOX, s.scissor);
-    s.blend = glIsEnabled(GL_BLEND);
-    s.scissorTest = glIsEnabled(GL_SCISSOR_TEST);
-}
-
-static void RestoreGL(const GLState& s) {
-    glUseProgram(s.program);
-    glBindVertexArray(s.vao);
-    glBindFramebuffer(GL_FRAMEBUFFER, s.fbo);
-    glViewport(
-        s.viewport[0], s.viewport[1],
-        s.viewport[2], s.viewport[3]
-    );
-    glScissor(
-        s.scissor[0], s.scissor[1],
-        s.scissor[2], s.scissor[3]
-    );
-    s.blend ? glEnable(GL_BLEND) : glDisable(GL_BLEND);
-    s.scissorTest ? glEnable(GL_SCISSOR_TEST) : glDisable(GL_SCISSOR_TEST);
-}
-
-// InputConsumer::initializeMotionEvent
-static void (*initMotionEvent)(void*, void*, void*) = nullptr;
-static void HookInput1(void* thiz, void* a1, void* a2) {
-    if (initMotionEvent) initMotionEvent(thiz, a1, a2);
-    if (thiz && g_Initialized) {
-        ImGui_ImplAndroid_HandleInputEvent((AInputEvent*)thiz);
-    }
-}
-
-// InputConsumer::Consume
-static int32_t (*Consume)(void*, void*, bool, long, uint32_t*, AInputEvent**) = nullptr;
-static int32_t HookInput2(void* thiz, void* a1, bool a2, long a3, uint32_t* a4, AInputEvent** event) {
-    int32_t result = Consume ? Consume(thiz, a1, a2, a3, a4, event) : 0;
-    if (result == 0 && event && *event && g_Initialized) {
-        ImGui_ImplAndroid_HandleInputEvent(*event);
-    }
-    return result;
-}
-
-static void HookLegacyInput() {
-    void* sym1 = (void*)GlossSymbol(GlossOpen("libinput.so"),
-        "_ZN7android13InputConsumer21initializeMotionEventEPNS_11MotionEventEPKNS_12InputMessageE", nullptr);
-    if (sym1) {
-        GHook h = GlossHook(sym1, (void*)HookInput1, (void**)&initMotionEvent);
-        if (h) {
-            LOGI("HookInput1: successfully hooked InputConsumer::initializeMotionEvent");
-        }
-    }
-    void* sym2 = (void*)GlossSymbol(GlossOpen("libinput.so"),
-        "_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE", nullptr);
-    if (sym2) {
-        GHook h = GlossHook(sym2, (void*)HookInput2, (void**)&Consume);
-        if (h) {
-            LOGI("HookInput2: successfully hooked InputConsumer::consume");
-        }
-    }
-}
-
-struct WindowBounds {
-    float x, y, w, h;
-    bool visible;
-};
-
-static WindowBounds g_bounds[3] = {
-    {0,0,0,0,false}, // menu
-    {0,0,0,0,false}, // info
-    {0,0,0,0,false}  // keypad
-};
-
-static void UpdateBounds(int index) {
-    std::lock_guard<std::mutex> lock(g_boundsMutex);
-    ImVec2 pos = ImGui::GetWindowPos();
-    ImVec2 size = ImGui::GetWindowSize();
-    g_bounds[index] = {pos.x, pos.y, size.x, size.y, true};
-}
-
-static bool HandleTouchEvent(int action, int pointerId, float x, float y) {
-    ImGuiIO& io = ImGui::GetIO();
-    io.MousePos = ImVec2(x, y);
-    bool isTouchInsideGui = false;
-    {
-        std::lock_guard<std::mutex> lock(g_boundsMutex);
-        auto InBounds = [&](const WindowBounds& b) {
-            return b.visible && x >= b.x && x <= (b.x + b.w) && y >= b.y && y <= (b.y + b.h);
-        };
-        for (int i = 0; i < 3; i++) {
-            if (InBounds(g_bounds[i])) {
-                isTouchInsideGui = true;
-                break;
-            }
-        }
-    }
-    switch (action & 0xFF) {
-        case 0: // DOWN
-        {
-            io.MouseDown[0] = true;
-            if (isTouchInsideGui) {
-                g_touchCapturedByGui = true;
-                return true; // block game
-            }
-            g_touchCapturedByGui = false;
-            return false;
-        }
-        case 1: // UP
-        {
-            io.MouseDown[0] = false;
-            bool wasCaptured = g_touchCapturedByGui;
-            g_touchCapturedByGui = false;
-            return wasCaptured; // block only if GUI owned it
-        }
-        case 2: // MOVE
-            return g_touchCapturedByGui;
-    }
-    return false;
-}
-
-static void RegisterPreloaderTouch() {
-    LOGI("Checking for Preloader input support...");
-    GHandle hPreloader = GlossOpen("libpreloader.so");
-    if (!hPreloader) {
-        LOGW("libpreloader.so not found, using legacy input");
-        HookLegacyInput();
-        return;
-    }
-    void* sym = (void*)GlossSymbol(hPreloader, "GetPreloaderInput", nullptr);
-    if (!sym) {
-        LOGW("GetPreloaderInput not found in libpreloader.so, using legacy input");
-        HookLegacyInput();
-        return;
-    }
-    PreloaderInput_Interface* (*GetInputFunc)();
-    GetInputFunc = reinterpret_cast<PreloaderInput_Interface*(*)()>(sym);
-    PreloaderInput_Interface* input = GetInputFunc();
-    if (!input || !input->RegisterTouchCallback) {
-        LOGW("Preloader input invalid. Falling back to legacy.");
-        HookLegacyInput();
-        return;
-    }
-    input->RegisterTouchCallback(HandleTouchEvent);
-    LOGI("Using Preloader touch input.");
-}
-
-static uint32_t EncodeCmpW8Imm_Table(int imm) { // for absorb type
+uint32_t EncodeCmpW8Imm_Table(int imm) { // For absorb type
     if (imm < 0 || imm > 575) return 0;
     uint32_t instr = 0x7100001F;
     int block = imm / 64;
@@ -234,11 +36,9 @@ static std::vector<PatternByte> ParsePattern(const std::string& patternStr) {
 }
 
 static bool MatchPattern(const uint8_t* memory, const std::vector<PatternByte>& pattern) {
-    for (size_t i = 0; i < pattern.size(); i++) {
-        if (!pattern[i].isWildcard && memory[i] != pattern[i].data) {
+    for (size_t i = 0; i < pattern.size(); i++)
+        if (!pattern[i].isWildcard && memory[i] != pattern[i].data)
             return false;
-        }
-    }
     return true;
 }
 
@@ -298,7 +98,7 @@ static void ScanSignatures() {
     g_PatchesReady = true;
 }
 
-static void DrawMenu() {
+void DrawMenu() {
     ImGui::Begin("AnarchyArray", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize);
     UpdateBounds(0);
     static bool infinitySpread = false;
@@ -306,6 +106,7 @@ static void DrawMenu() {
     static bool spongePlusPlus = false;
     static int absorbTypeVal = 5;
     static int lastAbsorbValue = -1;
+
     // InfinitySpread
     if (ImGui::Checkbox("InfinitySpread", &infinitySpread) && g_PatchesReady) {
         const uint8_t patch[] = {0x03, 0x00, 0x80, 0x52};
@@ -317,6 +118,7 @@ static void DrawMenu() {
             }
         }
     }
+
     // SpongeRange+
     if (ImGui::Checkbox("SpongeRange+", &spongePlus) && g_PatchesReady) {
         const uint8_t patchPlus[] = {0x1F, 0x20, 0x03, 0xD5, 0xFB, 0x13, 0x40, 0xF9, 0x7F, 0x07, 0x00, 0xB1};
@@ -329,8 +131,9 @@ static void DrawMenu() {
             }
         }
     }
+
     // SpongeRange++
-    ImGui::BeginDisabled(!spongePlus); // grey out if SpongeRange+ is not active
+    ImGui::BeginDisabled(!spongePlus); // Grey out if SpongeRange+ is not active
     if (ImGui::Checkbox("SpongeRange++", &spongePlusPlus) && g_PatchesReady) {
         const uint8_t patchPlusPlus[] = {0x5F, 0xFD, 0x03, 0xF1, 0x8B, 0x2D, 0x0D, 0x9B};
         size_t idx = 5;
@@ -343,36 +146,44 @@ static void DrawMenu() {
         }
     }
     ImGui::EndDisabled();
+
     ImGui::Text("Absorb Type");
     ImGui::SameLine();
+
     // Number display
     ImGui::SetNextItemWidth(50);
     ImGui::InputInt("##absorbDisplay", &absorbTypeVal, 0, 0, ImGuiInputTextFlags_ReadOnly);
     ImGui::SameLine();
+
     // K button + square gap + minus/plus arrows
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 6));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 4));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+
     // Keypad button
     if (ImGui::Button("K", ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()))) {
         ImGui::OpenPopup("AbsorbKeypad");
     }
     ImGui::SameLine();
+
     // i button
     if (ImGui::Button("i", ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()))) {
         ImGui::OpenPopup("AbsorbTypeInfo");
     }
     ImGui::SameLine();
+
     // Minus button
     if (ImGui::Button("-", ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()))) {
         if (absorbTypeVal > 0) absorbTypeVal--;
     }
     ImGui::SameLine();
+
     // Plus button
     if (ImGui::Button("+", ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()))) {
         if (absorbTypeVal < 575) absorbTypeVal++;
     }
     ImGui::PopStyleVar(3);
+
     // Apply patch when value changes
     if (g_PatchesReady && absorbTypeVal >= 0 && absorbTypeVal <= 575 && absorbTypeVal != lastAbsorbValue) {
         uint32_t instr = EncodeCmpW8Imm_Table(absorbTypeVal);
@@ -385,6 +196,7 @@ static void DrawMenu() {
             lastAbsorbValue = absorbTypeVal;
         }
     }
+
     // Info popup
     if (ImGui::BeginPopup("AbsorbTypeInfo", ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize)) {
         UpdateBounds(1);
@@ -410,6 +222,7 @@ static void DrawMenu() {
             ImGui::BulletText("10 = fire, soul fire");
             ImGui::BulletText("11 = glass");
             ImGui::BulletText("12 = tnt");
+
             // Second column
             ImGui::TableNextColumn();
             ImGui::BulletText("13 = ice (not blue/packed)");
@@ -432,6 +245,7 @@ static void DrawMenu() {
         std::lock_guard<std::mutex> lock(g_boundsMutex);
         g_bounds[1].visible = false;
     }
+
     // Keypad popup window
     if (ImGui::BeginPopup("AbsorbKeypad", ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize)) {
         UpdateBounds(2);
@@ -442,9 +256,11 @@ static void DrawMenu() {
             ImGui::CloseCurrentPopup();
         }
         ImGui::Separator();
+
         // Fixed keypad grid size
         const float cellWidth = 60.0f;
         const float rowHeight = 50.0f;
+
         // 1 2 3
         for (int i = 1; i <= 3; i++) {
             if (ImGui::Button(std::to_string(i).c_str(), ImVec2(cellWidth, rowHeight))) {
@@ -452,6 +268,7 @@ static void DrawMenu() {
             }
             if (i < 3) ImGui::SameLine();
         }
+
         // 4 5 6
         for (int i = 4; i <= 6; i++) {
             if (ImGui::Button(std::to_string(i).c_str(), ImVec2(cellWidth, rowHeight))) {
@@ -459,6 +276,7 @@ static void DrawMenu() {
             }
             if (i < 6) ImGui::SameLine();
         }
+
         // 7 8 9
         for (int i = 7; i <= 9; i++) {
             if (ImGui::Button(std::to_string(i).c_str(), ImVec2(cellWidth, rowHeight))) {
@@ -466,6 +284,7 @@ static void DrawMenu() {
             }
             if (i < 9) ImGui::SameLine();
         }
+
         // blank 0 <-
         ImGui::Dummy(ImVec2(cellWidth, rowHeight));
         ImGui::SameLine();
@@ -484,79 +303,7 @@ static void DrawMenu() {
     ImGui::End();
 }
 
-static void Setup(ANativeWindow* window) {
-    ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO();
-    io.IniFilename = nullptr;
-    io.ConfigFlags |= ImGuiConfigFlags_IsTouchScreen;
-    float scale = (float)g_Height / 720.0f;
-    if (scale < 1.5f) scale = 1.5f;
-    if (scale > 4.0f) scale = 4.0f;
-    ImFontConfig cfg;
-    cfg.SizePixels = 30.0f * scale;
-    io.Fonts->AddFontDefault(&cfg);
-    ImGui_ImplAndroid_Init(window);
-    ImGui_ImplOpenGL3_Init("#version 300 es");
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.ScaleAllSizes(scale * 1.10f);
-    style.Alpha = 1.0f;
-    g_Initialized = true;
-    LOGI("ImGui initialized successfully");
-}
-
-static void Render() {
-    if (!g_Initialized) return;
-    static int lastW = 0, lastH = 0;
-    ImGuiIO& io = ImGui::GetIO();
-    if (g_Width != lastW || g_Height != lastH) {
-        io.DisplaySize = ImVec2((float)g_Width, (float)g_Height);
-        lastW = g_Width;
-        lastH = g_Height;
-    }
-    GLState gl;
-    SaveGL(gl);
-    ImGui_ImplOpenGL3_NewFrame();
-    ImGui_ImplAndroid_NewFrame();
-    ImGui::NewFrame();
-    DrawMenu();
-    ImGui::Render();
-    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-    RestoreGL(gl);
-}
-
-static ANativeWindow* hook_ANativeWindow_fromSurface(JNIEnv* env, jobject surface) {
-    ANativeWindow* win = orig_ANativeWindow_fromSurface(env, surface);
-    g_Window = win;
-    return win;
-}
-
-static EGLBoolean hook_eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read, EGLContext ctx) {
-    EGLBoolean result = orig_eglMakeCurrent(dpy, draw, read, ctx);
-    if (!g_Initialized && g_Window && draw != EGL_NO_SURFACE) {
-        EGLint w=0,h=0;
-        eglQuerySurface(dpy, draw, EGL_WIDTH, &w);
-        eglQuerySurface(dpy, draw, EGL_HEIGHT, &h);
-        g_Width = w;
-        g_Height = h;
-        Setup(g_Window);
-    }
-    return result;
-}
-
-static EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surf) {
-    if (!orig_eglSwapBuffers) return EGL_FALSE;
-    EGLContext ctx = eglGetCurrentContext();
-    if (ctx == EGL_NO_CONTEXT) return orig_eglSwapBuffers(dpy, surf);
-    EGLint w = 0, h = 0;
-    eglQuerySurface(dpy, surf, EGL_WIDTH, &w);
-    eglQuerySurface(dpy, surf, EGL_HEIGHT, &h);
-    g_Width = w;
-    g_Height = h;
-    if (g_Initialized) Render();
-    return orig_eglSwapBuffers(dpy, surf);
-}
-
-static void* MainThread(void*) {
+static void* Initialize() {
     GlossInit(true);
     GHandle hEGL = GlossOpen("libEGL.so");
     if (hEGL) {
@@ -572,20 +319,12 @@ static void* MainThread(void*) {
     }
     RegisterPreloaderTouch();
     ScanSignatures();
-    LOGI("MainThread finished setup");
+    LOGI("Initialization setup");
     return nullptr;
 }
 
-JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    JNIEnv* env = nullptr;
-    if (vm->GetEnv((void**)&env, JNI_VERSION_1_6) != JNI_OK) {
-        return JNI_ERR;
-    }
-    LOGI("JNI_OnLoad called");
-    pthread_t t;
-    pthread_create(&t, nullptr, MainThread, nullptr);
-    return JNI_VERSION_1_6;
-}
-
-JNIEXPORT void JNICALL JNI_OnUnload(JavaVM* vm, void* reserved) {
+__attribute__((constructor))
+void Init() {
+    LOGI("AnarchyArray Loaded");
+    Initialize();
 }
