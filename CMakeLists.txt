@@ -27,7 +27,7 @@ include(FetchContent)
 FetchContent_Declare(
     preloader_android
     GIT_REPOSITORY https://github.com/LiteLDev/preloader-android.git
-    GIT_TAG main
+    GIT_TAG 95a40b1
 )
 FetchContent_MakeAvailable(preloader_android)
 
