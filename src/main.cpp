@@ -1,8 +1,14 @@
 #include "main.hpp"
 #include "input.hpp"
 #include "rendering.hpp"
+#include <sstream>
+#include <vector>
+#include <string>
+#include <mutex>
+#include <unistd.h>
+#include <dlfcn.h>
 
-uint32_t EncodeCmpW8Imm_Table(int imm) { // For absorb type
+uint32_t EncodeCmpW8Imm_Table(int imm) {
     if (imm < 0 || imm > 575) return 0;
     uint32_t instr = 0x7100001F;
     int block = imm / 64;
@@ -12,6 +18,10 @@ uint32_t EncodeCmpW8Imm_Table(int imm) { // For absorb type
     p[1] = immByte;
     p[2] = (uint8_t)block;
     return instr;
+}
+
+uint32_t EncodeMovW1Imm(uint16_t imm) {
+    return 0x52800001 | ((static_cast<uint32_t>(imm) & 0xFFFF) << 5);
 }
 
 struct PatternByte {
@@ -42,6 +52,38 @@ static bool MatchPattern(const uint8_t* memory, const std::vector<PatternByte>& 
     return true;
 }
 
+static void ApplyPatch(size_t index, const std::string& patchStr, bool enable) {
+    if (!g_PatchesReady || index >= g_PatchAddrs.size() || g_PatchAddrs[index] == 0) return;
+
+    uintptr_t addr = g_PatchAddrs[index];
+    const auto& original = g_Originals[index];
+
+    if (!enable) {
+        WriteMemory(reinterpret_cast<void*>(addr), const_cast<uint8_t*>(original.data()), original.size(), true);
+        return;
+    }
+
+    std::vector<PatternByte> patchPattern = ParsePattern(patchStr);
+    if (patchPattern.empty()) return;
+
+    std::vector<uint8_t> buffer(patchPattern.size());
+    for (size_t i = 0; i < patchPattern.size(); i++) {
+        if (patchPattern[i].isWildcard) {
+            buffer[i] = (i < original.size()) ? original[i] : 0x00;
+        } else {
+            buffer[i] = patchPattern[i].data;
+        }
+    }
+
+    WriteMemory(reinterpret_cast<void*>(addr), buffer.data(), buffer.size(), true);
+}
+
+static void ApplyPatchRange(size_t startIdx, size_t count, const std::string& patchStr, bool enable) {
+    for (size_t i = startIdx; i < startIdx + count && i < g_PatchAddrs.size(); i++) {
+        ApplyPatch(i, patchStr, enable);
+    }
+}
+
 uintptr_t GetLibBase() {
     size_t textSize{};
     uintptr_t text = GlossGetLibSection("libminecraftpe.so", ".text", &textSize);
@@ -65,13 +107,11 @@ static void ScanSignatures() {
         "E3 ?? ?? 2A E4 ?? ?? AA 85 ?? ?? 52 08 ?? ?? 11",
         "E3 ?? ?? 2A 29 ?? ?? 11 E4 ?? ?? AA 45 ?? ?? 52",
         // SpongeLimit+ (Index 4)
-        "62 02 00 54 FB 13 40 F9 7F 17 00 F1",
-        // SpongeLimit++ (Index 5)
-        "5F 51 05 F1 8B 2D 0D 9B",
-        // 1st CMP W8 #5 (Index 6)
-        "1F 15 00 71 A1 01 00 54 00 E4 00 6F",
-        // 2nd CMP W8 #5 (Index 7)
-        "1F 15 00 71 01 F8 FF 54 88 02 40 F9"
+        "C2 02 00 54 F7 13 40 F9 FF 16 00 F1",
+        // 1st CMP W8 #5 (Index 5)
+        "1F 15 00 71 E1 01 00 54 00 E4 00 6F 68 02 40 F9",
+        // 2nd MOV W1 #5 (Index 6)
+        "A1 00 80 52 E2 13 07 94 40 F7 07 36"
     };
 
     g_PatchAddrs.assign(patternStrings.size(), 0);
@@ -99,145 +139,214 @@ static void ScanSignatures() {
 }
 
 void DrawMenu() {
-    ImGui::Begin("AnarchyArray", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize);
+    ImGui::Begin("AnarchyArray", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
     UpdateBounds(0);
+
     static bool infinitySpread = false;
+
+    // Cardinal Direction states
+    // Index 0 = West, Index 1 = North, Index 2 = East, Index 3 = South
+    static bool infSpreadW = false;
+    static bool infSpreadN = false;
+    static bool infSpreadE = false;
+    static bool infSpreadS = false;
+
     static bool spongePlus = false;
-    static bool spongePlusPlus = false;
     static int absorbTypeVal = 5;
     static int lastAbsorbValue = -1;
 
-    // InfinitySpread
+    static const char* kAbsorbNames[] = {
+        "Air", "Dirt", "Wood", "Metal", "Copper Grates",
+        "Water", "Lava", "Leaves", "Plants", "Azalea, Dried Kelp, Solid Plants",
+        "Fire, Soul Fire", "Glass", "TNT", "Ice (not blue/packed)", "Powdered Snow",
+        "Cactus", "Portals", "Unknown", "Bubble Column", "Unknown",
+        "Decorated Pot, Decoration Solids", "ClientRequestPlaceholder", "Structure Void", "Stone, etc, Solids", 
+        "Torches, Pot, etc, Non-Solids", "Unknown"
+    };
+
+    static const char* kNumberStrings[] = {
+        "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+        "10", "11", "12", "13", "14", "15", "16", "17", "18", "19",
+        "20", "21", "22", "23", "24", "25"
+    };
+
+    constexpr int kAbsorbCount = static_cast<int>(sizeof(kAbsorbNames) / sizeof(kAbsorbNames[0])); // 26
+    constexpr int kMaxAbsorbIdx = kAbsorbCount - 1; // 25
+
+    // Check if any cardinal direction is currently enabled
+    const bool anyDirectionActive = infSpreadW || infSpreadN || infSpreadE || infSpreadS;
+
+    if (anyDirectionActive) ImGui::BeginDisabled();
+
     if (ImGui::Checkbox("InfinitySpread", &infinitySpread) && g_PatchesReady) {
-        const uint8_t patch[] = {0x03, 0x00, 0x80, 0x52};
-        for (size_t i = 0; i < 4 && i < g_PatchAddrs.size(); i++) {
-            if (infinitySpread) {
-                WriteMemory((void*)g_PatchAddrs[i], (void*)patch, sizeof(patch), true);
-            } else {
-                WriteMemory((void*)g_PatchAddrs[i], g_Originals[i].data(), g_Originals[i].size(), true);
-            }
-        }
+        ApplyPatchRange(0, 4, "03 00 80 52", infinitySpread);
     }
+
+    if (anyDirectionActive) ImGui::EndDisabled();
+
+    if (infinitySpread) ImGui::BeginDisabled();
+
+    if (ImGui::TreeNode("I.S. Directional Control")) {
+        if (ImGui::BeginTable("CompassGrid", 3, ImGuiTableFlags_SizingFixedFit)) {
+            const float colWidth = ImGui::GetFontSize() * 2.2f;
+            ImGui::TableSetupColumn("W", ImGuiTableColumnFlags_WidthFixed, colWidth);
+            ImGui::TableSetupColumn("N/S", ImGuiTableColumnFlags_WidthFixed, colWidth);
+            ImGui::TableSetupColumn("E", ImGuiTableColumnFlags_WidthFixed, colWidth);
+
+            // Row 1: NORTH
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(1);
+            if (ImGui::Checkbox("N##North", &infSpreadN) && g_PatchesReady) {
+                ApplyPatch(1, "03 00 80 52", infSpreadN); // Patch #2 = North
+            }
+
+            // Row 2: WEST & EAST
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            if (ImGui::Checkbox("W##West", &infSpreadW) && g_PatchesReady) {
+                ApplyPatch(0, "03 00 80 52", infSpreadW); // Patch #1 = West
+            }
+
+            ImGui::TableSetColumnIndex(2);
+            if (ImGui::Checkbox("E##East", &infSpreadE) && g_PatchesReady) {
+                ApplyPatch(2, "03 00 80 52", infSpreadE); // Patch #3 = East
+            }
+
+            // Row 3: SOUTH
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(1);
+            if (ImGui::Checkbox("S##South", &infSpreadS) && g_PatchesReady) {
+                ApplyPatch(3, "03 00 80 52", infSpreadS); // Patch #4 = South
+            }
+
+            ImGui::EndTable();
+        }
+        ImGui::TreePop();
+    }
+
+    if (infinitySpread) ImGui::EndDisabled();
 
     // SpongeRange+
     if (ImGui::Checkbox("SpongeRange+", &spongePlus) && g_PatchesReady) {
-        const uint8_t patchPlus[] = {0x1F, 0x20, 0x03, 0xD5, 0xFB, 0x13, 0x40, 0xF9, 0x7F, 0x07, 0x00, 0xB1};
-        size_t idx = 4;
-        if (idx < g_PatchAddrs.size()) {
-            if (spongePlus) {
-                WriteMemory((void*)g_PatchAddrs[idx], (void*)patchPlus, sizeof(patchPlus), true);
-            } else {
-                WriteMemory((void*)g_PatchAddrs[idx], g_Originals[idx].data(), g_Originals[idx].size(), true);
-            }
-        }
+        ApplyPatch(4, "1F 20 03 D5 ?? ?? ?? ?? FF 06 00 B1", spongePlus);
     }
-
-    // SpongeRange++
-    ImGui::BeginDisabled(!spongePlus); // Grey out if SpongeRange+ is not active
-    if (ImGui::Checkbox("SpongeRange++", &spongePlusPlus) && g_PatchesReady) {
-        const uint8_t patchPlusPlus[] = {0x5F, 0xFD, 0x03, 0xF1, 0x8B, 0x2D, 0x0D, 0x9B};
-        size_t idx = 5;
-        if (idx < g_PatchAddrs.size()) {
-            if (spongePlusPlus) {
-                WriteMemory((void*)g_PatchAddrs[idx], (void*)patchPlusPlus, sizeof(patchPlusPlus), true);
-            } else {
-                WriteMemory((void*)g_PatchAddrs[idx], g_Originals[idx].data(), g_Originals[idx].size(), true);
-            }
-        }
-    }
-    ImGui::EndDisabled();
 
     ImGui::Text("Absorb Type");
     ImGui::SameLine();
 
-    // Number display
-    ImGui::SetNextItemWidth(50);
-    ImGui::InputInt("##absorbDisplay", &absorbTypeVal, 0, 0, ImGuiInputTextFlags_ReadOnly);
+    const float sliderWidth = ImGui::GetFontSize() * 7.5f;
+    ImGui::SetNextItemWidth(sliderWidth);
+    ImGui::SliderInt("##absorbSlider", &absorbTypeVal, 0, kMaxAbsorbIdx, "%d");
     ImGui::SameLine();
 
-    // K button + square gap + minus/plus arrows
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 6));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 4));
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+    const float btnSize = ImGui::GetFrameHeight();
 
-    // Keypad button
-    if (ImGui::Button("K", ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()))) {
-        ImGui::OpenPopup("AbsorbKeypad");
+    if (ImGui::Button("Grid", ImVec2(btnSize * 1.8f, btnSize))) {
+        ImGui::OpenPopup("AbsorbGrid");
     }
     ImGui::SameLine();
 
-    // i button
-    if (ImGui::Button("i", ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()))) {
+    if (ImGui::Button("i", ImVec2(btnSize, btnSize))) {
         ImGui::OpenPopup("AbsorbTypeInfo");
     }
-    ImGui::SameLine();
 
-    // Minus button
-    if (ImGui::Button("-", ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()))) {
-        if (absorbTypeVal > 0) absorbTypeVal--;
+    if (absorbTypeVal >= 0 && absorbTypeVal <= kMaxAbsorbIdx) {
+        ImGui::TextColored(ImVec4(0.75f, 0.55f, 0.90f, 1.00f), "Target: %s", kAbsorbNames[absorbTypeVal]);
     }
-    ImGui::SameLine();
 
-    // Plus button
-    if (ImGui::Button("+", ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()))) {
-        if (absorbTypeVal < 575) absorbTypeVal++;
-    }
-    ImGui::PopStyleVar(3);
-
-    // Apply patch when value changes
-    if (g_PatchesReady && absorbTypeVal >= 0 && absorbTypeVal <= 575 && absorbTypeVal != lastAbsorbValue) {
-        uint32_t instr = EncodeCmpW8Imm_Table(absorbTypeVal);
-        if (instr != 0) {
-            for (size_t idx : {6, 7}) {
-                if (idx < g_PatchAddrs.size()) {
-                    WriteMemory((void*)g_PatchAddrs[idx], &instr, 4, true);
-                }
-            }
-            lastAbsorbValue = absorbTypeVal;
+    if (g_PatchesReady && absorbTypeVal >= 0 && absorbTypeVal <= kMaxAbsorbIdx && absorbTypeVal != lastAbsorbValue) {
+        uint32_t cmpInstr = EncodeCmpW8Imm_Table(absorbTypeVal);
+        uint32_t movInstr = EncodeMovW1Imm(static_cast<uint16_t>(absorbTypeVal));
+    
+        if (cmpInstr != 0 && 5 < g_PatchAddrs.size() && g_PatchAddrs[5] != 0) {
+            WriteMemory(reinterpret_cast<void*>(g_PatchAddrs[5]), &cmpInstr, sizeof(cmpInstr), true);
         }
+    
+        if (6 < g_PatchAddrs.size() && g_PatchAddrs[6] != 0) {
+            WriteMemory(reinterpret_cast<void*>(g_PatchAddrs[6]), &movInstr, sizeof(movInstr), true);
+        }
+    
+        lastAbsorbValue = absorbTypeVal;
     }
 
-    // Info popup
-    if (ImGui::BeginPopup("AbsorbTypeInfo", ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize)) {
-        UpdateBounds(1);
-        ImGui::Text("Absorb Type Reference");
-        ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - ImGui::GetFrameHeight());
-        if (ImGui::Button("X", ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()))) {
+    if (ImGui::BeginPopup("AbsorbGrid", ImGuiWindowFlags_AlwaysAutoResize)) {
+        UpdateBounds(2);
+        ImGui::Text("Select Absorb Type (0 - %d)", kMaxAbsorbIdx);
+        ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - btnSize);
+        if (ImGui::Button("X", ImVec2(btnSize, btnSize))) {
             ImGui::CloseCurrentPopup();
         }
         ImGui::Separator();
-        if (ImGui::BeginTable("AbsorbRefTable", 2, ImGuiTableFlags_NoBordersInBody)) {
-            // First column
-            ImGui::TableNextColumn();
-            ImGui::BulletText("0 = air");
-            ImGui::BulletText("1 = dirt");
-            ImGui::BulletText("2 = wood");
-            ImGui::BulletText("3 = metal");
-            ImGui::BulletText("4 = copper grates");
-            ImGui::BulletText("5 = water");
-            ImGui::BulletText("6 = lava");
-            ImGui::BulletText("7 = leaves");
-            ImGui::BulletText("8 = plants");
-            ImGui::BulletText("9 = azalea, dried kelp, solid plants");
-            ImGui::BulletText("10 = fire, soul fire");
-            ImGui::BulletText("11 = glass");
-            ImGui::BulletText("12 = tnt");
 
-            // Second column
+        const float cellWidth = ImGui::GetFontSize() * 2.6f;
+        const float rowHeight = ImGui::GetFontSize() * 2.0f;
+        const int columns = 5;
+
+        for (int i = 0; i < kAbsorbCount; i++) {
+            bool isSelected = (absorbTypeVal == i);
+            
+            if (isSelected) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.82f, 0.12f, 0.28f, 1.00f));
+            }
+
+            if (ImGui::Button(kNumberStrings[i], ImVec2(cellWidth, rowHeight))) {
+                absorbTypeVal = i;
+                ImGui::CloseCurrentPopup();
+            }
+
+            if (isSelected) {
+                ImGui::PopStyleColor();
+            }
+
+            if ((i + 1) % columns != 0 && i < kMaxAbsorbIdx) {
+                ImGui::SameLine();
+            }
+        }
+        ImGui::EndPopup();
+    } else {
+        std::lock_guard<std::mutex> lock(g_boundsMutex);
+        g_bounds[2].visible = false;
+    }
+
+    if (ImGui::BeginPopup("AbsorbTypeInfo", ImGuiWindowFlags_AlwaysAutoResize)) {
+        UpdateBounds(1);
+        ImGui::Text("Absorb Type Reference");
+        ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - btnSize);
+        if (ImGui::Button("X", ImVec2(btnSize, btnSize))) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::Separator();
+        
+        if (ImGui::BeginTable("AbsorbRefTable", 2, ImGuiTableFlags_NoBordersInBody)) {
             ImGui::TableNextColumn();
-            ImGui::BulletText("13 = ice (not blue/packed)");
-            ImGui::BulletText("14 = powdered snow");
-            ImGui::BulletText("15 = cactus");
-            ImGui::BulletText("16 = portals");
-            ImGui::BulletText("17 = unknown");
-            ImGui::BulletText("18 = bubble column");
-            ImGui::BulletText("19 = unknown");
-            ImGui::BulletText("20 = decorated pot, decoration solids");
-            ImGui::BulletText("21 = n/a");
-            ImGui::BulletText("22 = structure void");
-            ImGui::BulletText("23 = stone, etc, solids");
-            ImGui::BulletText("24 = torches, pot, etc, non-solids");
-            ImGui::BulletText("25 = unknown");
+            ImGui::BulletText("0 = Air");
+            ImGui::BulletText("1 = Dirt");
+            ImGui::BulletText("2 = Wood");
+            ImGui::BulletText("3 = Metal");
+            ImGui::BulletText("4 = Copper grates");
+            ImGui::BulletText("5 = Water");
+            ImGui::BulletText("6 = Lava");
+            ImGui::BulletText("7 = Leaves");
+            ImGui::BulletText("8 = Plants");
+            ImGui::BulletText("9 = Azalea, dried kelp, solid plants");
+            ImGui::BulletText("10 = Fire, soul fire");
+            ImGui::BulletText("11 = Glass");
+            ImGui::BulletText("12 = Tnt");
+
+            ImGui::TableNextColumn();
+            ImGui::BulletText("13 = Ice (not blue/packed)");
+            ImGui::BulletText("14 = Powdered snow");
+            ImGui::BulletText("15 = Cactus");
+            ImGui::BulletText("16 = Portals");
+            ImGui::BulletText("17 = Unknown");
+            ImGui::BulletText("18 = Bubble column");
+            ImGui::BulletText("19 = Unknown");
+            ImGui::BulletText("20 = Decorated pot, decoration solids");
+            ImGui::BulletText("21 = ClientRequestPlaceholder");
+            ImGui::BulletText("22 = Structure void");
+            ImGui::BulletText("23 = Stone, etc, solids");
+            ImGui::BulletText("24 = Torches, pot, etc, non-solids");
+            ImGui::BulletText("25 = Unknown");
             ImGui::EndTable();
         }
         ImGui::EndPopup();
@@ -246,60 +355,6 @@ void DrawMenu() {
         g_bounds[1].visible = false;
     }
 
-    // Keypad popup window
-    if (ImGui::BeginPopup("AbsorbKeypad", ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize)) {
-        UpdateBounds(2);
-        // Title bar with a close X button at top-right
-        ImGui::Text("Keypad");
-        ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - ImGui::GetFrameHeight());
-        if (ImGui::Button("X", ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()))) {
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::Separator();
-
-        // Fixed keypad grid size
-        const float cellWidth = 60.0f;
-        const float rowHeight = 50.0f;
-
-        // 1 2 3
-        for (int i = 1; i <= 3; i++) {
-            if (ImGui::Button(std::to_string(i).c_str(), ImVec2(cellWidth, rowHeight))) {
-                absorbTypeVal = absorbTypeVal * 10 + i;
-            }
-            if (i < 3) ImGui::SameLine();
-        }
-
-        // 4 5 6
-        for (int i = 4; i <= 6; i++) {
-            if (ImGui::Button(std::to_string(i).c_str(), ImVec2(cellWidth, rowHeight))) {
-                absorbTypeVal = absorbTypeVal * 10 + i;
-            }
-            if (i < 6) ImGui::SameLine();
-        }
-
-        // 7 8 9
-        for (int i = 7; i <= 9; i++) {
-            if (ImGui::Button(std::to_string(i).c_str(), ImVec2(cellWidth, rowHeight))) {
-                absorbTypeVal = absorbTypeVal * 10 + i;
-            }
-            if (i < 9) ImGui::SameLine();
-        }
-
-        // blank 0 <-
-        ImGui::Dummy(ImVec2(cellWidth, rowHeight));
-        ImGui::SameLine();
-        if (ImGui::Button("0", ImVec2(cellWidth, rowHeight))) {
-            absorbTypeVal = absorbTypeVal * 10;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("<-", ImVec2(cellWidth, rowHeight))) { // backspace arrow
-            absorbTypeVal /= 10;
-        }
-        ImGui::EndPopup();
-    } else {
-        std::lock_guard<std::mutex> lock(g_boundsMutex);
-        g_bounds[2].visible = false;
-    }
     ImGui::End();
 }
 
