@@ -8,12 +8,17 @@
 > [!CAUTION]  
 > ⚠️ **ENTER AT YOUR OWN RISK — these modules are chaos engines.**  
 >  
-> 🚫 Do **NOT** load survival saves, long‑term builds, or worlds you care about.  
-> 🔥 These mechanics are instant, global, and irreversible.  
-> 📈 Playing with them will **massively increase world size**.  
-> 🧨 Expect terrain collapse, fluid chaos, and total instability.  
+> 🚫 Do **NOT** load survival saves, long‑term builds, or worlds you care about.
+> 
+> 📈 Playing with them will **massively increase world size**.
+> 
+> 📉 But will gradually decreased to normal size, IF you let all the chaos settle
+>
+> ⚖️ So saving the would mid chaos is heavy
+> 
+> 🧨 Expect Anarchy (& Lag and Heat)
 >  
-> 👉 Use **only** in disposable test worlds. Embrace the destruction.
+> 👉 Use **only** in disposable test worlds. Or in your precious worlds, if you want, IF... The Choice is Yours. Embrace the destruction
 
 > [!WARNING]  
 > ⚠️ **Disable tile drops** — otherwise performance will nosedive into unplayable lag.
@@ -24,21 +29,18 @@
 ---
 ![Guide Image 2](assets/image2.jpg)
 ---
-⚡ Now it won't lag because of that popping out leaf litter and kelp.
+⚡ Now it won't lag because of that popping out leaf litter and kelp. Or would it?
 
-## ✨ Features (once activated)
+## ✨ Features
 
 - 🌊 **InfinitySpread**  
-  One block of water or lava becomes an endless flood or eruption.  
+  One block of water or lava becomes an endless flood.
 
 - 🧽 **SpongeRange+**  
   Sponges absorb far beyond their normal radius, wiping huge areas clean in seconds.  
 
-- 🧽 **SpongeRange++**  
-  If your device survived SpongeRange+, push it further — near-total wipe potential.  
-
 - 🔄 **AbsorbType for Sponge**  
-  Sponges don’t just soak water; they’ll consume lava, blocks, and more depending on config.  
+  Sponges don’t just absorb water; they’ll absorb lava, blocks, and more depending on config.  
 
 ## 📖 Known AbsorbTypes
 
@@ -63,7 +65,7 @@
 - 18 = bubble column
 - 19 = unknown
 - 20 = decorated pot, decoration solids
-- 21 = n/a
+- 21 = ClientRequestPlaceholder
 - 22 = structure void
 - 23 = sand, stone, deeplate, etc, solids
 - 24 = torches, scaffolding, pot, non-solids
