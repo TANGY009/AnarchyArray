@@ -14,6 +14,7 @@
 #include <android/log.h>
 #include <android/native_window.h>
 #include <dlfcn.h>
+#include <arm_neon.h>
 
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>

@@ -1,12 +1,6 @@
 #include "main.hpp"
 #include "input.hpp"
 #include "rendering.hpp"
-#include <sstream>
-#include <vector>
-#include <string>
-#include <mutex>
-#include <unistd.h>
-#include <dlfcn.h>
 
 uint32_t EncodeCmpW8Imm_Table(int imm) {
     if (imm < 0 || imm > 575) return 0;
@@ -102,38 +96,83 @@ static void ScanSignatures() {
     }
     const std::vector<std::string> patternStrings = {
         // InfinitySpread (Index 0-3)
-        "E3 ?? ?? 2A E4 ?? ?? AA A5 ?? ?? 52 08 ?? ?? 51",
-        "E3 ?? ?? 2A 29 ?? ?? 51 E4 ?? ?? AA 65 ?? ?? 52",
-        "E3 ?? ?? 2A E4 ?? ?? AA 85 ?? ?? 52 08 ?? ?? 11",
-        "E3 ?? ?? 2A 29 ?? ?? 11 E4 ?? ?? AA 45 ?? ?? 52",
+        "E3 ?? ?? 2A E4 ?? ?? AA A5 ?? ?? 52 08 ?? ?? 51", // 1
+        "E3 ?? ?? 2A 29 ?? ?? 51 E4 ?? ?? AA 65 ?? ?? 52", // 2
+        "E3 ?? ?? 2A E4 ?? ?? AA 85 ?? ?? 52 08 ?? ?? 11", // 3
+        "E3 ?? ?? 2A 29 ?? ?? 11 E4 ?? ?? AA 45 ?? ?? 52", // 4
         // SpongeLimit+ (Index 4)
-        "C2 02 00 54 F7 13 40 F9 FF 16 00 F1",
+        "C2 02 00 54 F7 13 40 F9 FF 16 00 F1", // 7
         // 1st CMP W8 #5 (Index 5)
-        "1F 15 00 71 E1 01 00 54 00 E4 00 6F 68 02 40 F9",
+        "1F 15 00 71 E1 01 00 54 00 E4 00 6F 68 02 40 F9", // 5
         // 2nd MOV W1 #5 (Index 6)
-        "A1 00 80 52 E2 13 07 94 40 F7 07 36"
+        "A1 00 80 52 ?? ?? 07 94 40 F7 07 36" // 6
     };
 
     g_PatchAddrs.assign(patternStrings.size(), 0);
     g_Originals.clear();
     g_Originals.resize(patternStrings.size());
     
-    for (size_t s = 0; s < patternStrings.size(); s++) {
-        std::vector<PatternByte> parsedPattern = ParsePattern(patternStrings[s]);
-        size_t patternLen = parsedPattern.size();
-        if (patternLen == 0 || patternLen > size) continue;
-        for (size_t i = 0; i <= size - patternLen; i++) {
-            uintptr_t currentAddr = txtbase + i;
-            if (MatchPattern(reinterpret_cast<const uint8_t*>(currentAddr), parsedPattern)) {
-                g_PatchAddrs[s] = currentAddr;
-                g_Originals[s].assign(
-                    reinterpret_cast<uint8_t*>(currentAddr), 
-                    reinterpret_cast<uint8_t*>(currentAddr) + patternLen
-                );
-                LOGI("Signature found at binary offset: 0x%lx", (unsigned long)(currentAddr - base));
+    std::vector<std::vector<PatternByte>> parsedPatterns;
+    
+    for (const auto& patternStr : patternStrings) {
+        parsedPatterns.push_back(ParsePattern(patternStr));
+    }
+    
+    for (size_t i = 0; i + 16 <= size; i += 16) {
+        const uint8_t* current = reinterpret_cast<const uint8_t*>(txtbase + i);
+        uint8x16_t data = vld1q_u8(current);
+    
+        for (size_t s = 0; s < parsedPatterns.size(); s++) {
+            if (g_PatchAddrs[s] != 0) continue;
+    
+            const auto& pattern = parsedPatterns[s];
+            size_t patternLen = pattern.size();
+    
+            if (patternLen == 0 || i + patternLen > size) continue;
+    
+            size_t anchor = 0;
+    
+            while (anchor < patternLen && pattern[anchor].isWildcard) anchor++;
+    
+            if (anchor == patternLen || anchor != 0) continue;
+    
+            uint8_t anchorValue = pattern[anchor].data;
+            uint8x16_t target = vdupq_n_u8(anchorValue);
+            uint8x16_t compare = vceqq_u8(data, target);
+    
+            uint64x2_t lanes = vreinterpretq_u64_u8(compare);
+    
+            if (vgetq_lane_u64(lanes, 0) == 0 && vgetq_lane_u64(lanes, 1) == 0) continue;
+    
+            for (size_t lane = 0; lane < 16; lane += 4) {
+                size_t offset = i + lane;
+    
+                if (offset + patternLen > size) continue;
+    
+                const uint8_t* match = reinterpret_cast<const uint8_t*>(txtbase + offset);
+    
+                if (match[anchor] != anchorValue) continue;
+    
+                if (!MatchPattern(match, pattern)) continue;
+    
+                g_PatchAddrs[s] = txtbase + offset;
+                g_Originals[s].assign(match, match + patternLen);
+    
+                LOGI("Signature [%zu] found at binary offset: 0x%lx", s, (unsigned long)(g_PatchAddrs[s] - base));
                 break;
             }
         }
+    
+        bool allFound = true;
+    
+        for (size_t s = 0; s < parsedPatterns.size(); s++) {
+            if (g_PatchAddrs[s] == 0) {
+                allFound = false;
+                break;
+            }
+        }
+    
+        if (allFound) break;
     }
     g_PatchesReady = true;
 }
