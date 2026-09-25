@@ -3,16 +3,16 @@
   "id": "AnarchyArray",
   "version": "1.0.5",
   "minecraft_versions": [
-    "1.26.50.X"
+    "1.26.5X.X"
   ],
   "info": {
     "name": "AnarchyArray",
     "author": "TANGY009",
-    "description": "Flood entire worlds with a single water or lava source, then wipe them clean instantly with supercharged sponges that absorb water, lava, and even blocks — all configurable.",
+    "description": "Inifinitly spreading water and lava, huge sponge absorb range, and configurable sponge block absorb type!",
     "homepage_url": "https://github.com/TANGY009/AnarchyArray",
-    "icon": "assets/icon.png",
+    "icon": "icon.png",
     "tags": [
-      "Gameplay"
+      "Experimental"
     ]
   },
   "release_assets": {
