@@ -17,10 +17,10 @@
   },
   "release_assets": {
     "include": [
-      "*.so"
+      "*.levipack"
     ],
     "labels": {
-      "libAnarchyArray.so": "Native library"
+      "AnarchyArray.levipack": "LeviPack"
     }
   }
 }
