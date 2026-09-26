@@ -3,6 +3,7 @@
   "id": "anarchyarray",
   "version": "1.0.5",
   "minecraft_versions": [
+    "1.26.4X.X",
     "1.26.5X.X"
   ],
   "info": {
